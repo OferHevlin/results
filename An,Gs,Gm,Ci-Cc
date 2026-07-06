@@ -1,0 +1,105 @@
+import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
+import seaborn as sns
+from statsmodels.stats.multicomp import pairwise_tukeyhsd
+import networkx as nx
+import string
+
+# מיפוי וקבועים
+room_map_codes = {'D': '16/10°C', 'C': '22/16°C', 'B': '28/22°C', 'A': '34/28°C'}
+room_order = ["16/10°C", "22/16°C", "28/22°C", "34/28°C"]
+colors = ["#89AFFF", "#9D8AF2", "#E371A9", "#FF9D66"]
+
+def preprocess_data(filename):
+    df = pd.read_csv(filename)
+    df['RoomName'] = df['Room'].map(room_map_codes)
+    # סינון ל-420 ppm ומדידה ראשונה לכל צמח
+    data_420 = df[df['CO2_r_sp'] == 420].copy()
+    if 215 in data_420.index:
+        data_420 = data_420.drop(index=215)
+    data_filt = data_420.groupby(['Room', 'Plant'], as_index=False).first()
+    data_filt['RoomName'] = pd.Categorical(data_filt['RoomName'], categories=room_order, ordered=True)
+    return data_filt
+
+# טעינת שני בסיסי הנתונים (gm מהחדש, השאר מהישן)
+df_old = preprocess_data('gm_fromAci_barplotClean1.csv')
+df_new = preprocess_data('gm_fromAci_barplotClean.csv')
+
+def get_stat_letters(data, var_name):
+    df_sub = data.dropna(subset=[var_name, 'RoomName'])
+    if df_sub.empty: return {r: "" for r in room_order}
+    tukey = pairwise_tukeyhsd(endog=df_sub[var_name], groups=df_sub['RoomName'].astype(str), alpha=0.05)
+    summary_data = tukey.summary().data
+    results_df = pd.DataFrame(summary_data[1:], columns=summary_data[0])
+    G = nx.Graph()
+    G.add_nodes_from(room_order)
+    for _, row in results_df.iterrows():
+        if not row['reject']:
+            G.add_edge(row['group1'], row['group2'])
+    cliques = list(nx.find_cliques(G))
+    means = df_sub.groupby('RoomName', observed=True)[var_name].mean()
+    sorted_cliques = sorted(cliques, key=lambda c: means[list(c)].mean(), reverse=True)
+    letters = {cat: "" for cat in room_order}
+    for i, clique in enumerate(sorted_cliques):
+        char = string.ascii_lowercase[i]
+        for cat in clique:
+            letters[cat] += char
+    return {k: "".join(sorted(list(set(v)))) for k, v in letters.items()}
+
+# הגדרות הגרפים
+plots = [
+    ('A',     df_old, r'$A_n$ [$\mu mol \cdot m^{-2} \cdot s^{-1}$]', (0, 22),  '(a)'),
+    ('gsw',   df_old, r'$g_{sw}$ [$mol \cdot m^{-2} \cdot s^{-1}$]', (0, 0.45), '(b)'),
+    ('gm',    df_new, r'$g_m$ [$mol \cdot m^{-2} \cdot s^{-1}$]',  (0, 0.16), '(c)'),
+    ('Ci-Cc', df_old, r'$C_i - C_c$ [$\mu mol \cdot mol^{-1}$]', (0, 320),  '(d)')
+]
+
+sns.set_theme(style="whitegrid")
+fig, axes = plt.subplots(2, 2, figsize=(12, 12))
+axes = axes.flatten()
+
+for i, (var, data_src, ylabel, ylim, label) in enumerate(plots):
+    ax = axes[i]
+    curr_data = data_src.copy()
+    
+    # ניקוי ערכי מקסימום בחדר 16 עבור gm ו-Ci-Cc
+    if var in ['Ci-Cc', 'gm']:
+        room_16_mask = curr_data['RoomName'] == '16/10°C'
+        if room_16_mask.any():
+            max_val_16 = curr_data.loc[room_16_mask, var].max()
+            curr_data = curr_data.drop(index=curr_data[(room_16_mask) & (curr_data[var] == max_val_16)].index)
+
+    # חישוב אותיות סטטיסטיות
+    letters_dict = get_stat_letters(curr_data, var)
+    
+    # ציור Boxplot עם שפמים (whiskers) שמכסים את כל הטווח [0, 100]
+    sns.boxplot(data=curr_data, x='RoomName', y=var, order=room_order, palette=colors,
+                width=0.4, showfliers=False, whis=[0, 100], linewidth=1.2, ax=ax,
+                boxprops=dict(edgecolor='black'), medianprops=dict(color='black', linewidth=2))
+    
+    sns.stripplot(data=curr_data, x='RoomName', y=var, order=room_order, 
+                  color='black', alpha=0.3, jitter=True, size=4, ax=ax)
+
+    # עיצוב משבצות וכותרות פנימיות
+    ax.xaxis.grid(True, color='lightgrey', linestyle='-', linewidth=0.5)
+    ax.yaxis.grid(True, color='lightgrey', linestyle='-', linewidth=0.5)
+    ax.text(0.03, 0.97, label, transform=ax.transAxes, fontsize=18, fontweight='bold', va='top')
+    ax.set_ylabel(ylabel, fontsize=14)
+    ax.set_xlabel('Growth temperature' if i >= 2 else '', fontsize=14)
+    ax.set_ylim(ylim)
+    
+    # הוספת אותיות סטטיסטיקה
+    for j, room in enumerate(room_order):
+        room_vals = curr_data[curr_data['RoomName'] == room][var]
+        if not room_vals.empty:
+            top_val = room_vals.max()
+            ax.text(j, top_val + (ylim[1] * 0.05), letters_dict[room], 
+                    ha='center', va='bottom', fontsize=12, fontweight='bold')
+
+plt.tight_layout()
+
+# שמירה לקובץ PDF כפי שביקשת
+plt.savefig('etr_vs_qin_nrh_styled.pdf')
+
+plt.show()
