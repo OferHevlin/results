@@ -1,0 +1,161 @@
+import pandas as pd
+import matplotlib.pyplot as plt
+import os
+import glob
+import re
+import numpy as np
+import seaborn as sns
+from statsmodels.stats.multicomp import pairwise_tukeyhsd
+import networkx as nx
+import string
+
+# 1. Image Area in mm2
+pixels_width = 4034
+pixels_height = 3040
+um_per_pixel = 0.0878
+area_mm2 = (pixels_width * um_per_pixel * pixels_height * um_per_pixel) / 1_000_000
+
+# 2. Design Constants
+room_map_codes = {'RoomD': '16/10°C', 'RoomC': '22/16°C', 'RoomB': '28/22°C', 'RoomA': '34/28°C'}
+room_order = ["16/10°C", "22/16°C", "28/22°C", "34/28°C"]
+colors = ["#89AFFF", "#9D8AF2", "#E371A9", "#FF9D66"]
+
+# 3. Data Processing
+data_list = []
+all_files = glob.glob("*.csv")
+# Filter to only Room A-D files and exclude summary files
+room_files = [f for f in all_files if re.search(r'Room[A-D]', f) and 'summary' not in f and 'processed' not in f]
+
+for f in room_files:
+    room_match = re.search(r'(Room[A-D])', f)
+    if not room_match: continue
+    room_key = room_match.group(1)
+    try:
+        df = pd.read_csv(f)
+        df.columns = [c.strip() for c in df.columns]
+        df['Name'] = df['Name'].astype(str)
+        df['Value'] = pd.to_numeric(df['Value'], errors='coerce')
+        
+        # Density
+        count_rows = df[df['Name'].str.contains('Red Counts', case=False, na=False)]
+        count = count_rows['Value'].sum() if not count_rows.empty else 0
+        
+        # Aperture
+        ap_rows = df[df['Name'].str.startswith('O', na=False) | df['Name'].str.contains(r'\(Blue\)', case=False, na=False)]
+        avg_aperture = ap_rows['Value'].dropna().mean() if not ap_rows.empty else None
+        
+        # Size
+        widths, lengths, red_lengths = {}, {}, {}
+        for _, row in df.iterrows():
+            name, val = row['Name'], row['Value']
+            if pd.isna(val): continue
+            red_m = re.search(r'Length (\d+) \(Red\)', name, re.IGNORECASE)
+            if red_m: red_lengths[int(red_m.group(1))] = val
+            idx_m = re.search(r'(\d+)', name)
+            if not idx_m: continue
+            idx = int(idx_m.group(1))
+            if (name.startswith('W') and not name.startswith('White')) or 'wide' in name.lower(): widths[idx] = val
+            elif (name.startswith('L') or 'length' in name.lower()) and '(blue)' not in name.lower(): lengths[idx] = val
+        
+        areas = []
+        for idx in widths:
+            if idx in lengths: areas.append(widths[idx] * lengths[idx])
+        if red_lengths:
+            indices = sorted(red_lengths.keys())
+            for i in range(0, len(indices)-1, 2):
+                if indices[i+1] == indices[i] + 1:
+                    areas.append(red_lengths[indices[i]] * red_lengths[indices[i+1]])
+        
+        avg_size = pd.Series(areas).mean() if areas else None
+        data_list.append({
+            'Filename': f,
+            'RoomName': room_map_codes[room_key], 
+            'Density': count/area_mm2, 
+            'Avg_Aperture': avg_aperture, 
+            'Avg_Size': avg_size
+        })
+    except: continue
+
+df_all = pd.DataFrame(data_list)
+df_all['RoomName'] = pd.Categorical(df_all['RoomName'], categories=room_order, ordered=True)
+
+# --- FILTERING ---
+# 1. Remove highest aperture in 16/10°C (Room D)
+room_16_mask = df_all['RoomName'] == '16/10°C'
+if room_16_mask.any():
+    highest_ap_idx = df_all[room_16_mask]['Avg_Aperture'].idxmax()
+    df_all = df_all.drop(highest_ap_idx)
+
+# 2. Remove 0 density in 34/28°C (Room A)
+room_34_zero_mask = (df_all['RoomName'] == '34/28°C') & (df_all['Density'] == 0)
+df_all = df_all.drop(df_all[room_34_zero_mask].index)
+
+# --- STATS ---
+def get_stat_letters(data, var_name):
+    df_sub = data.dropna(subset=[var_name, 'RoomName'])
+    if df_sub.empty: return {r: "" for r in room_order}
+    tukey = pairwise_tukeyhsd(endog=df_sub[var_name], groups=df_sub['RoomName'].astype(str), alpha=0.05)
+    summary_data = tukey.summary().data
+    results_df = pd.DataFrame(summary_data[1:], columns=summary_data[0])
+    G = nx.Graph()
+    G.add_nodes_from(room_order)
+    for _, row in results_df.iterrows():
+        if not row['reject']:
+            G.add_edge(row['group1'], row['group2'])
+    cliques = list(nx.find_cliques(G))
+    means = df_sub.groupby('RoomName', observed=True)[var_name].mean()
+    sorted_cliques = sorted(cliques, key=lambda c: means[list(c)].mean(), reverse=True)
+    letters = {cat: "" for cat in room_order}
+    for i, clique in enumerate(sorted_cliques):
+        char = string.ascii_lowercase[i]
+        for cat in clique:
+            letters[cat] += char
+    return {k: "".join(sorted(list(set(v)))) for k, v in letters.items()}
+
+# --- PLOTTING ---
+sns.set_theme(style="whitegrid")
+fig, axes = plt.subplots(1, 3, figsize=(18, 7))
+
+plots = [
+    ('Density', r'Density [per $mm^2$]', '(a)'),
+    ('Avg_Aperture', r'Aperture [$\mu m$]', '(b)'),
+    ('Avg_Size', r'Size [$\mu m^2$]', '(c)')
+]
+
+for i, (var, ylabel, label) in enumerate(plots):
+    ax = axes[i]
+    letters_dict = get_stat_letters(df_all, var)
+    v_max = df_all[var].max()
+    ylim = (0, v_max * 1.25)
+    
+    sns.boxplot(data=df_all, x='RoomName', y=var, order=room_order, palette=colors,
+                width=0.4, showfliers=False, whis=[0, 100], linewidth=1.2, ax=ax,
+                boxprops=dict(edgecolor='black'), medianprops=dict(color='black', linewidth=2))
+    
+    sns.stripplot(data=df_all, x='RoomName', y=var, order=room_order, 
+                  color='black', alpha=0.3, jitter=True, size=4, ax=ax)
+
+    # Grid and styling
+    ax.xaxis.grid(True, color='lightgrey', linestyle='-', linewidth=0.5)
+    ax.yaxis.grid(True, color='lightgrey', linestyle='-', linewidth=0.5)
+    ax.text(0.03, 0.97, label, transform=ax.transAxes, fontsize=18, fontweight='bold', va='top')
+    ax.set_ylabel(ylabel, fontsize=14)
+    ax.set_xlabel('Growth temperature', fontsize=14)
+    ax.set_ylim(ylim)
+    
+    # Statistical letters
+    for j, room in enumerate(room_order):
+        room_vals = df_all[df_all['RoomName'] == room][var]
+        if not room_vals.empty:
+            top_val = room_vals.max()
+            ax.text(j, top_val + (ylim[1] * 0.03), letters_dict[room], 
+                    ha='center', va='bottom', fontsize=12, fontweight='bold')
+
+plt.tight_layout()
+
+# REQUESTED SAVE LINE
+plt.savefig('etr_vs_qin_nrh_styled.pdf')
+
+# Also keep PNG for display
+plt.savefig('stomata_final_labels_cleaned.png', dpi=300)
+print("Graph saved as etr_vs_qin_nrh_styled.pdf and stomata_final_labels_cleaned.png")
