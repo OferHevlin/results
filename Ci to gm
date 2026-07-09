@@ -1,0 +1,99 @@
+import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
+import seaborn as sns
+from matplotlib.lines import Line2D
+from scipy.interpolate import LSQUnivariateSpline
+
+# Check for pygam
+try:
+    from pygam import LinearGAM, s
+    HAS_PYGAM = True
+except ImportError:
+    HAS_PYGAM = False
+
+# Load data
+filename = 'gm_fromAci_barplotClean.csv'
+df = pd.read_csv(filename)
+
+# Pre-processing
+plot_df = df.dropna(subset=['Room', 'gm', 'Ci', 'CO2_r_sp']).copy()
+plot_df = plot_df[(plot_df['gm'] >= 0) & (plot_df['gm'] <= 0.6) & (plot_df['Ci'] <= 800)]
+
+# Calculate means and SEM
+stats_df = plot_df.groupby(['Room', 'CO2_r_sp']).agg(
+    Ci_mean=('Ci', 'mean'), Ci_sem=('Ci', 'sem'),
+    gm_mean=('gm', 'mean'), gm_sem=('gm', 'sem')
+).reset_index()
+
+# Visual settings
+room_order = ['A', 'B', 'C', 'D']
+new_colors = {'D': '#A6C1FF', 'C': '#B1A2F7', 'B': '#EA8AB9', 'A': '#FFB88A'}
+temp_labels = {'A': '34/28', 'B': '28/22', 'C': '22/16', 'D': '16/10'}
+room_markers = {'A': 'o', 'B': 's', 'C': '^', 'D': 'd'}
+room_sizes = {'A': 13, 'B': 13, 'C': 18, 'D': 18}
+
+plt.figure(figsize=(14, 10))
+sns.set_theme(style="whitegrid")
+
+legend_elements = []
+
+for room in room_order:
+    room_data = stats_df[stats_df['Room'] == room].sort_values('Ci_mean')
+    if len(room_data) < 5: continue # Need enough points
+    
+    x = room_data['Ci_mean'].values
+    y = room_data['gm_mean'].values
+    y_err = room_data['gm_sem'].fillna(0).values
+    x_err = room_data['Ci_sem'].fillna(0).values
+
+    x_dense = np.linspace(x.min(), x.max(), 300)
+
+    if HAS_PYGAM:
+        gam = LinearGAM(s(0, n_splines=5, spline_order=3)).fit(x[:, None], y)
+        y_fit = gam.predict(x_dense[:, None])
+        
+        # Approximate SE band
+        conf = gam.confidence_intervals(x_dense[:, None], width=0.95)
+        y_low_fit, y_up_fit = conf[:, 0], conf[:, 1]
+    else:
+        # 5 splines, order 3 (cubic) = 1 internal knot
+        # The knot must be inside the range (x[0], x[-1])
+        knots = [np.percentile(x, 50)]
+        spl = LSQUnivariateSpline(x, y, knots, k=3)
+        y_fit = spl(x_dense)
+        
+        spl_up = LSQUnivariateSpline(x, y + y_err, knots, k=3)
+        y_up_fit = spl_up(x_dense)
+        spl_low = LSQUnivariateSpline(x, y - y_err, knots, k=3)
+        y_low_fit = spl_low(x_dense)
+
+    # Plot
+    plt.fill_between(x_dense, y_low_fit, y_up_fit, color=new_colors[room], alpha=0.15)
+    plt.plot(x_dense, y_fit, color=new_colors[room], lw=4)
+    
+    size = room_sizes[room]
+    plt.errorbar(x, y, xerr=x_err, yerr=y_err, fmt=room_markers[room], color=new_colors[room],
+                 ecolor=new_colors[room], elinewidth=1.8, capsize=4, markersize=size, 
+                 markeredgecolor='white', markeredgewidth=1.5, alpha=0.9, zorder=5)
+    
+    legend_elements.append(Line2D([0], [0], color=new_colors[room], lw=4, 
+                                  marker=room_markers[room], markersize=size, 
+                                  markeredgecolor='white', markeredgewidth=1.5, label=temp_labels[room]))
+
+plt.xlabel('$C_i$ [$\mu mol \cdot mol^{-1}$]', fontsize=28, labelpad=20)
+plt.ylabel('$g_m$ [$mol \cdot m^{-2} \cdot s^{-1}$]', fontsize=28, labelpad=40)
+plt.xticks(fontsize=22)
+plt.yticks(fontsize=22)
+plt.xlim(0, 800)
+plt.ylim(0, 0.2)
+
+plt.legend(handles=legend_elements, title='Growth Temperature ($^\circ$C)', fontsize=20, title_fontsize='22', loc='upper left')
+plt.grid(True, linestyle='-', linewidth='1.0', color='#e0e0e0')
+plt.tight_layout()
+
+plt.savefig('gm_vs_ci_gam_fit_final.png', dpi=300)
+plt.savefig('gm_vs_ci_gam_fit_final.pdf')
+plt.show()
+
+print(f"pygam status: {HAS_PYGAM}")
