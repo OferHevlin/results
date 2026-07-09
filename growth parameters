@@ -1,0 +1,101 @@
+import pandas as pd
+import matplotlib.pyplot as plt
+import seaborn as sns
+import numpy as np
+from statsmodels.stats.multicomp import pairwise_tukeyhsd
+import networkx as nx
+import string
+
+# 1. טעינת הנתונים והכנתם
+df = pd.read_csv('picaro.xlsx - Sheet1.csv')
+df = df[df['sample'].isin(['A', 'B', 'C', 'D'])].copy()
+
+room_map = {
+    'D': '16/10°C',
+    'C': '22/16°C',
+    'B': '28/22°C',
+    'A': '34/28°C'
+}
+room_order = ["16/10°C", "22/16°C", "28/22°C", "34/28°C"]
+colors = ["#89AFFF", "#9D8AF2", "#E371A9", "#FF9D66"]
+
+df['RoomName'] = df['sample'].map(room_map)
+df['RoomName'] = pd.Categorical(df['RoomName'], categories=room_order, ordered=True)
+
+# 2. חישוב אותיות סטטיסטיות (Tukey HSD)
+def get_stat_letters(data, var_name):
+    df_sub = data.dropna(subset=[var_name, 'RoomName'])
+    if df_sub.empty: return {r: "" for r in room_order}
+    tukey = pairwise_tukeyhsd(endog=df_sub[var_name], groups=df_sub['RoomName'].astype(str), alpha=0.05)
+    G = nx.Graph()
+    G.add_nodes_from(room_order)
+    summary_data = tukey.summary().data
+    results_df = pd.DataFrame(summary_data[1:], columns=summary_data[0])
+    for _, row in results_df.iterrows():
+        if not row['reject']: G.add_edge(row['group1'], row['group2'])
+    cliques = list(nx.find_cliques(G))
+    means = df_sub.groupby('RoomName', observed=True)[var_name].mean()
+    sorted_cliques = sorted(cliques, key=lambda c: means[list(c)].mean(), reverse=True)
+    letters = {cat: "" for cat in room_order}
+    for i, clique in enumerate(sorted_cliques):
+        char = string.ascii_lowercase[i]
+        for cat in clique: letters[cat] += char
+    return {k: "".join(sorted(list(set(v)))) for k, v in letters.items()}
+
+# 3. בניית הגרף הבודד עבור עמודת average
+sns.set_theme(style="whitegrid")
+
+# ניקוי מוחלט של הלוח כדי לוודא שאין גרפים קודמים ברקע
+plt.clf()
+fig, ax = plt.subplots(figsize=(9, 8))
+
+col = 'average'
+stats = df.groupby('RoomName', observed=True)[col].agg(['mean', 'std', 'count']).reindex(room_order)
+stats['se'] = stats['std'] / np.sqrt(stats['count'])
+letters_dict = get_stat_letters(df, col)
+
+# יצירת ה-Boxplot (ללא whiskers ברירת מחדל)
+sns.boxplot(data=df, x='RoomName', y=col, order=room_order, palette=colors,
+            width=0.4, showfliers=False, whis=0, 
+            linewidth=1.5, ax=ax,
+            boxprops=dict(edgecolor='black'), 
+            medianprops=dict(color='black', linewidth=2.5))
+
+# הוספת הנקודות
+sns.stripplot(data=df, x='RoomName', y=col, order=room_order, 
+              color='black', alpha=0.3, jitter=True, size=5, ax=ax)
+
+# הוספת קווי שגיאה (SE) ונקודת ממוצע
+x_pos = np.arange(len(room_order))
+ax.plot(x_pos, stats['mean'], 'ko', markersize=5)
+ax.errorbar(x_pos, stats['mean'], yerr=stats['se'], fmt='none', 
+            ecolor='black', capsize=8, elinewidth=2)
+
+# עיצוב רשת וצירים
+ax.xaxis.grid(True, color='lightgrey', linestyle='-', linewidth=0.5)
+ax.yaxis.grid(True, color='lightgrey', linestyle='-', linewidth=0.5)
+
+# גדלי פונטים וכותרות
+ax.set_ylabel('Delta', fontsize=22) 
+ax.set_xlabel('Growth temperature', fontsize=20)
+ax.tick_params(axis='both', which='major', labelsize=16)
+
+# התאמת גבולות הציד ומיקום אותיות סטטיסטיות
+v_max = df[col].max()
+v_min = df[col].min()
+ylim_top = v_max + abs(v_max * 0.2)
+ax.set_ylim(v_min - abs(v_min * 0.15), ylim_top)
+
+for j, room in enumerate(room_order):
+    room_vals = df[df['RoomName'] == room][col]
+    if not room_vals.empty:
+        top_of_bar = max(room_vals.max(), stats.loc[room, 'mean'] + stats.loc[room, 'se'])
+        ax.text(j, top_of_bar + abs(ylim_top * 0.02), letters_dict[room], 
+                ha='center', va='bottom', fontsize=18, fontweight='bold')
+
+plt.tight_layout()
+
+# שורות הסיום המבוקשות
+plt.savefig('jt_vs_qin_ylim200.png', dpi=300)
+plt.savefig('jt_vs_qin_ylim200.pdf')
+plt.show()
