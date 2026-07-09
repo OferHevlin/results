@@ -1,0 +1,185 @@
+import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
+import seaborn as sns
+from statsmodels.stats.multicomp import pairwise_tukeyhsd
+import networkx as nx
+import string
+
+# 1. טעינת הנתונים הגולמיים ועיבודם למבנה טבלאי מתאים (Tidy Data)
+raw_df = pd.read_csv("micro CT results.xlsx - Sheet1.csv")
+records = []
+cols_A = ['A1', 'A2', 'A3']
+cols_D = ['D1', 'D2', 'D3']
+
+row_names = {
+    0: 'Vox', 1: 'Vair', 2: 'Vcells', 3: 'Vtotal', 4: 'Vair_Vcells',
+    5: 'Sox', 6: 'Sair', 7: 'Scells', 8: 'Sair_Scells', 10: 'Thicknessavg'
+}
+
+# עדכון הכותרת של Thicknessavg ל-Leaf thicknessตาม שביקשת
+ylabels_map = {
+    0: '$V_{\mathrm{ox}}$ ($\mu\mathrm{m}^3$)',
+    1: '$V_{\mathrm{air}}$ ($\mu\mathrm{m}^3$)',
+    2: '$V_{\mathrm{cells}}$ ($\mu\mathrm{m}^3$)',
+    3: '$V_{\mathrm{total}}$ ($\mu\mathrm{m}^3$)',
+    4: '$V_{\mathrm{air}}$ / $V_{\mathrm{cells}}$ (%)',
+    5: '$S_{\mathrm{ox}}$ ($\mu\mathrm{m}^2$)',
+    6: '$S_{\mathrm{air}}$ ($\mu\mathrm{m}^2$)',
+    7: '$S_{\mathrm{cells}}$ ($\mu\mathrm{m}^2$)',
+    8: '$S_{\mathrm{air}}$ / $S_{\mathrm{cells}}$ (%)',
+    10: 'Leaf thickness ($\mu$m)' # שינוי הכותרת כאן
+}
+
+for col in cols_A:
+    d = {'Plant': col, 'RoomName': '34/28°C'}
+    for idx, var in row_names.items():
+        d[var] = raw_df.loc[idx, col]
+    records_all.append(d) if 'records_all' in locals() else None
+
+# Let's recreate records_all correctly
+records_all = []
+for col in cols_A:
+    d = {'Plant': col, 'RoomName': '34/28°C'}
+    for idx, var in row_names.items():
+        d[var] = raw_df.loc[idx, col]
+    records_all.append(d)
+
+for col in cols_D:
+    d = {'Plant': col, 'RoomName': '16/10°C'}
+    for idx, var in row_names.items():
+        d[var] = raw_df.loc[idx, col]
+    records_all.append(d)
+
+df_all = pd.DataFrame(records_all)
+room_order = ["16/10°C", "34/28°C"]
+colors = ["#89AFFF", "#FF9D66"]
+df_all['RoomName'] = pd.Categorical(df_all['RoomName'], categories=room_order, ordered=True)
+
+def get_stat_letters(data, var_name, order):
+    df_sub = data.dropna(subset=[var_name, 'RoomName'])
+    if df_sub.empty: return {r: "" for r in order}
+    
+    tukey = pairwise_tukeyhsd(endog=df_sub[var_name], groups=df_sub['RoomName'].astype(str), alpha=0.05)
+    summary_data = tukey.summary().data
+    results_df = pd.DataFrame(summary_data[1:], columns=summary_data[0])
+    
+    G = nx.Graph()
+    G.add_nodes_from(order)
+    for _, row in results_df.iterrows():
+        if not row['reject']:
+            G.add_edge(row['group1'], row['group2'])
+            
+    cliques = list(nx.find_cliques(G))
+    means = df_sub.groupby('RoomName', observed=True)[var_name].mean()
+    sorted_cliques = sorted(cliques, key=lambda c: means[list(c)].mean(), reverse=True)
+    
+    letters = {cat: "" for cat in order}
+    for i, clique in enumerate(sorted_cliques):
+        char = string.ascii_lowercase[i]
+        for cat in clique:
+            letters[cat] += char
+            
+    return {k: "".join(sorted(list(set(v)))) for k, v in letters.items()}
+
+# --- א: יצירת פאנל משולב של 5x2 ---
+plt.rcdefaults()
+sns.set_theme(style="white")
+fig, axes = plt.subplots(5, 2, figsize=(14, 25))
+axes = axes.flatten()
+
+alphabet = list(string.ascii_lowercase)
+
+for i, (idx, var) in enumerate(row_names.items()):
+    ax = axes[i]
+    panel_lbl = f"({alphabet[i]})"
+    
+    if var in ['Vox', 'Sox']:
+        curr_data = df_all[df_all['Plant'] != 'D1'].dropna(subset=[var, 'RoomName']).copy()
+    else:
+        curr_data = df_all.dropna(subset=[var, 'RoomName']).copy()
+        
+    letters_dict = get_stat_letters(curr_data, var, room_order)
+    
+    ax.set_facecolor('white')
+    
+    sns.boxplot(data=curr_data, x='RoomName', y=var, order=room_order, palette=colors,
+                width=0.4, showfliers=False, whis=[0, 100], linewidth=1.2, ax=ax,
+                boxprops=dict(edgecolor='black'), medianprops=dict(color='black', linewidth=2.5))
+    
+    sns.stripplot(data=curr_data, x='RoomName', y=var, order=room_order, 
+                  color='black', alpha=0.3, jitter=True, size=6, ax=ax)
+    
+    ax.grid(True, which='major', axis='both', color='#E0E0E0', linestyle='-', linewidth=0.8)
+    ax.set_axisbelow(True)
+    
+    for spine in ax.spines.values():
+        spine.set_color('#CCCCCC')
+        spine.set_linewidth(0.8)
+        
+    ax.set_ylabel(ylabels_map[idx], fontsize=18, fontweight='normal', color='black')
+    ax.set_xlabel('Growth temperature', fontsize=18, fontweight='normal', color='black')
+    ax.tick_params(axis='both', labelsize=15, labelcolor='black', colors='#666666')
+    
+    vals = curr_data[var]
+    ymin, ymax = vals.min() * 0.6 if vals.min() > 0 else 0, vals.max() * 1.25
+    if var in ['Vair_Vcells', 'Sair_Scells']:
+        ymin = 0
+    ax.set_ylim(ymin, ymax)
+    
+    for j, room in enumerate(room_order):
+        room_vals = curr_data[curr_data['RoomName'] == room][var]
+        if not room_vals.empty:
+            top_val = room_vals.max()
+            ax.text(j, top_val + (ymax * 0.02), letters_dict[room], 
+                    ha='center', va='bottom', fontsize=20, fontweight='normal', color='black')
+            
+    ax.text(0.03, 0.97, panel_lbl, transform=ax.transAxes, 
+            fontsize=22, fontweight='bold', va='top', ha='left',
+            bbox=dict(facecolor='white', alpha=0.8, edgecolor='none', boxstyle='round,pad=0.2'))
+
+plt.tight_layout()
+plt.savefig('micro_ct_all_parameters_combined.png', dpi=300, bbox_inches='tight')
+plt.savefig('micro_ct_all_parameters_combined.pdf', bbox_inches='tight')
+plt.close()
+
+# --- ב: עדכון ושמירת הגרף הבודד של Thickness באופן ספציפי ---
+idx, var = 10, 'Thicknessavg'
+fig_ind, ax_ind = plt.subplots(figsize=(7, 6))
+curr_data = df_all.dropna(subset=[var, 'RoomName']).copy()
+letters_dict = get_stat_letters(curr_data, var, room_order)
+
+sns.boxplot(data=curr_data, x='RoomName', y=var, order=room_order, palette=colors,
+            width=0.4, showfliers=False, whis=[0, 100], linewidth=1.2, ax=ax_ind,
+            boxprops=dict(edgecolor='black'), medianprops=dict(color='black', linewidth=2.5))
+
+sns.stripplot(data=curr_data, x='RoomName', y=var, order=room_order, 
+              color='black', alpha=0.3, jitter=True, size=6, ax=ax_ind)
+
+ax_ind.grid(True, which='major', axis='both', color='#E0E0E0', linestyle='-', linewidth=0.8)
+ax_ind.set_axisbelow(True)
+
+for spine in ax_ind.spines.values():
+    spine.set_color('#CCCCCC')
+    spine.set_linewidth(0.8)
+    
+ax_ind.set_ylabel(ylabels_map[idx], fontsize=18, fontweight='normal', color='black')
+ax_ind.set_xlabel('Growth temperature', fontsize=18, fontweight='normal', color='black')
+ax_ind.tick_params(axis='both', labelsize=15, labelcolor='black', colors='#666666')
+
+vals = curr_data[var]
+ymin, ymax = vals.min() * 0.6, vals.max() * 1.25
+ax_ind.set_ylim(ymin, ymax)
+
+for j, room in enumerate(room_order):
+    room_vals = curr_data[curr_data['RoomName'] == room][var]
+    if not room_vals.empty:
+        top_val = room_vals.max()
+        ax_ind.text(j, top_val + (ymax * 0.02), letters_dict[room], 
+                    ha='center', va='bottom', fontsize=20, fontweight='normal', color='black')
+        
+plt.tight_layout()
+plt.savefig('thicknessavg_scientific_plot.png', dpi=300, bbox_inches='tight')
+plt.close()
+
+print("Title for thickness parameter successfully changed to Leaf thickness!")
