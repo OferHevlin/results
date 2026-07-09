@@ -1,0 +1,118 @@
+import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
+import seaborn as sns
+from matplotlib.lines import Line2D
+from scipy.optimize import curve_fit
+
+# 1. LOAD DATA
+df = pd.read_csv('gm_fromLightcurve21.csv')
+
+# Preprocessing: Convert columns to numeric and handle negatives
+cols_to_clean = ['Jt', 'Jc', 'Jo', 'Rl', 'Qin']
+for col in cols_to_clean:
+    df[col] = pd.to_numeric(df[col], errors='coerce')
+
+# Global cleaning: Drop rows with missing essentials
+df_plot = df.dropna(subset=['Room', 'Qin']).copy()
+
+# 2. VISUAL SETTINGS
+room_order = ['A', 'B', 'C', 'D']
+new_colors = {'D': '#A6C1FF', 'C': '#B1A2F7', 'B': '#EA8AB9', 'A': '#FFB88A'}
+temp_labels = {'A': '34/28', 'B': '28/22', 'C': '22/16', 'D': '16/10'}
+room_markers = {'A': 'o', 'B': 's', 'C': '^', 'D': 'd'}
+room_sizes = {'A': 13, 'B': 13, 'C': 18, 'D': 18}
+
+sns.set_theme(style="whitegrid")
+
+# 3. HELPER FUNCTIONS
+def nrh_model(I, alpha, Rmax, theta, Rd):
+    term1 = alpha * I + Rmax
+    term2 = np.sqrt(np.maximum(term1**2 - 4 * theta * alpha * I * Rmax, 0.0))
+    return (1 / (2 * np.maximum(theta, 1e-6))) * (term1 - term2) - Rd
+
+# 4. CREATE FIGURE (2x2 Grid)
+fig, axes = plt.subplots(2, 2, figsize=(24, 22)) # Increased height slightly for larger text
+axes = axes.flatten()
+
+# Configuration for the 4 panels
+configs = [
+    ('Jt', '$J_{t}$ [$\mu mol \cdot m^{-2} \cdot s^{-1}$]', axes[0], '(a)', 'NRH'),
+    ('Jc', '$J_{c}$ [$\mu mol \cdot m^{-2} \cdot s^{-1}$]', axes[1], '(b)', 'Line'),
+    ('Jo', '$J_{o}$ [$\mu mol \cdot m^{-2} \cdot s^{-1}$]', axes[2], '(c)', 'Line'),
+    ('Rl', '$R_{l}$ [$\mu mol \cdot m^{-2} \cdot s^{-1}$]', axes[3], '(d)', 'Points')
+]
+
+legend_elements = []
+
+for i, (y_col, ylabel, ax, panel_label, plot_type) in enumerate(configs):
+    data = df_plot.dropna(subset=[y_col]).copy()
+    data.loc[data[y_col] < 0, y_col] = 0
+    
+    for room in room_order:
+        room_df = data[data['Room'] == room]
+        if room_df.empty: continue
+        
+        stats = room_df.groupby('Qin')[y_col].agg(['mean', 'sem']).reset_index().sort_values('Qin')
+        x_pts = stats['Qin'].values
+        y_pts = stats['mean'].values
+        y_err = stats['sem'].fillna(0).values
+        
+        size = room_sizes[room]
+        
+        if plot_type == 'NRH':
+            try:
+                popt, _ = curve_fit(nrh_model, room_df['Qin'].values, room_df['Jt'].values, 
+                                    p0=[0.3, 400, 0.7, 0], 
+                                    bounds=([0, 0, 0.01, -100], [1, 1000, 0.99, 100]))
+                x_smooth = np.linspace(x_pts.min(), x_pts.max(), 300)
+                y_smooth = nrh_model(x_smooth, *popt)
+                ax.fill_between(x_smooth, np.maximum(y_smooth - np.interp(x_smooth, x_pts, y_err), 0),
+                                y_smooth + np.interp(x_smooth, x_pts, y_err), 
+                                color=new_colors[room], alpha=0.1)
+                ax.plot(x_smooth, y_smooth, color=new_colors[room], lw=6, zorder=3)
+            except:
+                ax.plot(x_pts, y_pts, color=new_colors[room], lw=6, zorder=3)
+        
+        elif plot_type == 'Line':
+            ax.fill_between(x_pts, y_pts - y_err, y_pts + y_err, color=new_colors[room], alpha=0.1)
+            ax.plot(x_pts, y_pts, color=new_colors[room], lw=6, zorder=3)
+            
+        # Error bars and markers
+        ax.errorbar(x_pts, y_pts, yerr=y_err, fmt=room_markers[room], color=new_colors[room],
+                     ecolor=new_colors[room], elinewidth=2.5, capsize=5, markersize=size, 
+                     markeredgecolor='white', markeredgewidth=2.0, alpha=1.0, zorder=4,
+                     linestyle='None')
+
+        if i == 0:
+            legend_elements.append(Line2D([0], [0], color=new_colors[room], lw=6, 
+                                         marker=room_markers[room], markersize=size, 
+                                         markeredgecolor='white', markeredgewidth=1.5, 
+                                         label=temp_labels[room]))
+
+    # Panel styling with LARGER FONTS
+    ax.set_xlabel('$Q_{in}$ [$\mu mol \cdot m^{-2} \cdot s^{-1}$]', fontsize=32, labelpad=20)
+    ax.set_ylabel(ylabel, fontsize=32, labelpad=20)
+    ax.tick_params(axis='both', labelsize=26) # Tick values size
+    ax.set_xlim(0, 2150)
+    
+    if y_col == 'Jt': ax.set_ylim(0, 200)
+    elif y_col == 'Rl': ax.set_ylim(0, 7)
+    else: 
+        max_val = data[y_col].max()
+        ax.set_ylim(0, max_val * 1.2 if max_val > 0 else 100)
+
+    # Panel label (a, b, c, d)
+    ax.text(0.02, 0.95, panel_label, transform=ax.transAxes, fontsize=36, fontweight='bold', va='top')
+    ax.grid(True, linestyle='-', linewidth='1.0', color='#e0e0e0')
+
+# 5. LEGEND & FINAL LAYOUT with LARGER FONTS
+fig.legend(handles=legend_elements, title='Growth Temperature ($^\circ$C)', 
+           fontsize=28, title_fontsize='32', loc='lower center', 
+           bbox_to_anchor=(0.5, -0.05), ncol=4, frameon=True)
+
+plt.tight_layout(rect=[0, 0.05, 1, 1])
+
+# Save outputs
+plt.savefig('combined_panels_large_text.png', dpi=300, bbox_inches='tight')
+plt.savefig('combined_panels_large_text.pdf', bbox_inches='tight')
