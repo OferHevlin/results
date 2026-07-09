@@ -1,0 +1,81 @@
+import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
+import seaborn as sns
+from matplotlib.lines import Line2D
+
+# Load dataset
+df = pd.read_csv('2025-04-27-AllRooms_ACi.csv')
+plot_df = df.dropna(subset=['Room', 'Ci', 'A', 'CO2_r_sp']).copy()
+
+# Grouping to calculate means and SEM for points
+stats_df = plot_df.groupby(['Room', 'CO2_r_sp']).agg(
+    Ci_mean=('Ci', 'mean'), Ci_sem=('Ci', 'sem'),
+    A_mean=('A', 'mean'), A_sem=('A', 'sem')
+).reset_index()
+
+# Visual settings
+room_order = ['A', 'B', 'C', 'D']
+new_colors = {'D': '#A6C1FF', 'C': '#B1A2F7', 'B': '#EA8AB9', 'A': '#FFB88A'}
+temp_labels = {'A': '34/28', 'B': '28/22', 'C': '22/16', 'D': '16/10'}
+room_markers = {'A': 'o', 'B': 's', 'C': '^', 'D': 'd'}
+
+# Significantly enlarged sizes as requested
+room_sizes = {'A': 13, 'B': 13, 'C': 18, 'D': 18}
+
+plt.figure(figsize=(14, 10))
+sns.set_theme(style="whitegrid")
+
+legend_elements = []
+
+for room in room_order:
+    room_data = stats_df[stats_df['Room'] == room].sort_values('Ci_mean')
+    if room_data.empty: continue
+    
+    x_pts = room_data['Ci_mean'].values
+    y_pts = room_data['A_mean'].values
+    x_err = room_data['Ci_sem'].fillna(0).values
+    y_err = room_data['A_sem'].fillna(0).values
+    
+    # Polynomial fit of degree 2
+    p_fit = np.polyfit(x_pts, y_pts, 2)
+    poly = np.poly1d(p_fit)
+    
+    x_smooth = np.linspace(x_pts.min(), x_pts.max(), 300)
+    y_smooth = poly(x_smooth)
+    
+    # Interpolate SEM for the tight band
+    y_err_smooth = np.interp(x_smooth, x_pts, y_err)
+    
+    # Tight clean error ribbon
+    plt.fill_between(x_smooth, y_smooth - y_err_smooth * 0.2, y_smooth + y_err_smooth * 0.2,
+                     color=new_colors[room], alpha=0.18)
+    
+    # Smooth line matching the curve fit
+    plt.plot(x_smooth, y_smooth, color=new_colors[room], lw=4.5, zorder=3)
+        
+    size = room_sizes[room]
+    plt.errorbar(x_pts, y_pts, xerr=x_err, yerr=y_err, fmt=room_markers[room], color=new_colors[room],
+                 ecolor=new_colors[room], elinewidth=1.8, capsize=4, markersize=size,
+                 markeredgecolor='white', markeredgewidth=1.5, alpha=0.9, zorder=4)
+    
+    legend_elements.append(Line2D([0], [0], color=new_colors[room], lw=4,
+                                  marker=room_markers[room], markersize=size,
+                                  markeredgecolor='white', markeredgewidth=1.5,
+                                  label=temp_labels[room]))
+
+plt.xlabel('$C_i$ [$\mu mol \cdot mol^{-1}$]', fontsize=28, labelpad=20)
+plt.ylabel('$A$ [$\mu mol \cdot m^{-2} \cdot s^{-1}$]', fontsize=28, labelpad=40)
+plt.xticks(fontsize=22)
+plt.yticks(fontsize=22)
+plt.xlim(0, 900)
+plt.ylim(0, 35)
+
+plt.legend(handles=legend_elements, title='Growth Temperature ($^\circ$C)', fontsize=20, title_fontsize='22', loc='upper left')
+plt.grid(True, linestyle='-', linewidth='1.0', color='#e0e0e0')
+plt.tight_layout()
+
+plt.savefig('aci_curve_large_symbols.png', dpi=300)
+plt.savefig('aci_curve_large_symbols.pdf')
+plt.close()
+print("Generated plot with large symbols.")
