@@ -1,0 +1,132 @@
+import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
+from matplotlib.ticker import MultipleLocator
+from pathlib import Path
+
+# ------------ Config ------------
+FILES_BY_TEMP = {
+    "16/10": Path("/Volumes/NO NAME/VPD/final/2025-10-15-VPD_RoomD_ByMinute.xlsx"),
+    "22/16": Path("/Volumes/NO NAME/VPD/final/2025-10-08-VPD_RoomC_ByMinute.xlsx"),
+    "28/22": Path("/Volumes/NO NAME/VPD/final/2025-10-05-VPD_RoonB_ByMinutes.xlsx"),
+    "34/28": Path("/Volumes/NO NAME/VPD/final/2025-10-16-VPD_RoomA_ByMinute.xlsx"),
+}
+
+SAVE_FOLDER = Path("/Volumes/NO NAME/גרפים חדשים")
+TARGET_VPDS = [1.4, 2.4]   
+VPD_TOL = 0.05
+XLIM = (10, 90)  
+LOW_VPD_WINDOW = (10, 30)
+FIGSIZE = (12, 10)
+
+# --------------------------------
+
+def load_and_prepare(excel_path: Path):
+    if not excel_path.exists():
+        raise FileNotFoundError(f"File not found: {excel_path}")
+    df = pd.read_excel(excel_path)
+    colmap = {c.lower(): c for c in df.columns}
+
+    def find_col(possible_names):
+        for n in possible_names:
+            if n in colmap: return colmap[n]
+        raise ValueError(f"Missing column among: {possible_names}")
+
+    col_gsw = find_col(["gsw"])
+    col_vpd = find_col(["vpdleaf", "vpd"])
+    col_min = find_col(["minute", "minutes", "time_min", "time (min)"])
+
+    df = df[[col_gsw, col_vpd, col_min]].rename(columns={
+        col_gsw: "gsw", col_vpd: "VPDleaf", col_min: "minute",
+    })
+
+    df["minute"] = pd.to_numeric(df["minute"], errors="coerce").astype("Int64")
+    df = df.dropna(subset=["minute", "gsw", "VPDleaf"]).copy()
+    df["minute"] = df["minute"].astype(int)
+    df["gsw"] = df["gsw"].clip(lower=0)
+
+    df = df[(df["minute"] >= min(XLIM[0], LOW_VPD_WINDOW[0])) & (df["minute"] <= XLIM[1])].copy()
+
+    def snap_vpd(v):
+        v = float(v)
+        for t in TARGET_VPDS:
+            if abs(v - t) <= VPD_TOL: return t
+        return np.nan
+
+    df["VPD_group"] = df["VPDleaf"].apply(snap_vpd)
+    df = df.dropna(subset=["VPD_group"]).copy()
+
+    stats = (
+        df.groupby(["minute", "VPD_group"])["gsw"]
+          .agg(mean="mean", sem="sem")
+          .reset_index()
+          .rename(columns={"VPD_group": "VPDleaf"})
+    )
+
+    low  = stats[np.isclose(stats["VPDleaf"], TARGET_VPDS[0])].copy()
+    high = stats[np.isclose(stats["VPDleaf"], TARGET_VPDS[1])].copy()
+    low = low[(low["minute"] >= LOW_VPD_WINDOW[0]) & (low["minute"] <= LOW_VPD_WINDOW[1])].copy()
+
+    divider_x = (low["minute"].max() + high["minute"].min()) / 2 if (not low.empty and not high.empty) else (XLIM[0] + XLIM[1]) / 2
+    return low, high, divider_x
+
+# ---- Build figure ----
+fig, axes = plt.subplots(2, 2, figsize=FIGSIZE, sharex=True, sharey=True)
+axes = axes.ravel()
+
+handles_for_legend, labels_for_legend = None, None
+
+for i, (ax, (temp_label, xlsx_path)) in enumerate(zip(axes, FILES_BY_TEMP.items())):
+    try:
+        low, high, divider_x = load_and_prepare(xlsx_path)
+    except Exception as e:
+        ax.text(0.5, 0.5, f"Error:\n{e}", ha="center", va="center", transform=ax.transAxes)
+        continue
+
+    # Plotting helper to handle the "clipping" logic
+    for data, color, label in [(low, "tab:blue", f"Low VPD ({TARGET_VPDS[0]} kPa)"), 
+                               (high, "tab:orange", f"High VPD ({TARGET_VPDS[1]} kPa)")]:
+        if not data.empty:
+            # Shading
+            ax.fill_between(data["minute"], data["mean"] - data["sem"], data["mean"] + data["sem"], 
+                            color=color, alpha=0.15, edgecolor='none')
+            
+            # Error bars: we ensure the lower bar doesn't go below 0 visually
+            lower_err = np.where(data["mean"] - data["sem"] < 0, data["mean"], data["sem"])
+            
+            ax.errorbar(data["minute"], data["mean"], yerr=[lower_err, data["sem"]],
+                        fmt='o-', color=color, markersize=4, linewidth=1.2,
+                        capsize=2, elinewidth=0.8, alpha=0.9, label=label)
+
+    if handles_for_legend is None:
+        handles_for_legend, labels_for_legend = ax.get_legend_handles_labels()
+
+    ax.axvline(divider_x, linestyle="--", linewidth=1, color="gray", alpha=0.4)
+    ax.set_xlim(*XLIM)
+    ax.set_ylim(-0.01, 0.40) # Increased top limit for better bar visibility
+    
+    ax.xaxis.set_major_locator(MultipleLocator(10))
+    ax.tick_params(axis="both", labelsize=12)
+    ax.grid(True, linestyle=":", alpha=0.5)
+    ax.set_title(f"{temp_label} °C (day/night)", fontsize=14, fontweight="bold")
+
+# Shared Labels & Legend
+fig.text(0.5, 0.1, "Time (minutes)", ha="center", fontsize=16) 
+fig.text(0.02, 0.5, "gsw (mol m⁻² s⁻¹)", va="center", rotation="vertical", fontsize=16)
+
+if handles_for_legend:
+    fig.legend(handles_for_legend, labels_for_legend, loc="lower center", 
+               ncol=2, frameon=False, bbox_to_anchor=(0.5, 0.02), fontsize=12)
+
+plt.tight_layout(rect=[0.05, 0.12, 1, 0.95]) 
+
+# Save Section
+if SAVE_FOLDER.exists():
+    plt.savefig(SAVE_FOLDER / 'jt_vs_qin_final_shading.png', dpi=300)
+    plt.savefig(SAVE_FOLDER / 'jt_vs_qin_final_shading.pdf')
+    print(f"Success! Files saved to: {SAVE_FOLDER}")
+else:
+    print(f"Drive not found. Saving to current folder instead.")
+    plt.savefig('jt_vs_qin_final_shading.pdf')
+
+plt.show()
