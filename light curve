@@ -2,146 +2,83 @@ import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
 from scipy.optimize import curve_fit
-from scipy.stats import ttest_ind
-from sklearn.utils import resample
-import os
+from matplotlib.lines import Line2D
 
-# Load data
-data_file = '2025-04-27-AllRoom_light.csv'
-df = pd.read_csv(data_file)
+# 1. טעינת הנתונים
+file_path = '/Users/oferhevlin/Desktop/All Room Light 11 Apr 27 2025.csv'
+df = pd.read_csv(file_path)
+df = df.dropna(subset=['A', 'Room', 'Qin', 'Oxygen'])
 
-# NRH Model function
+# 2. הגדרת מודל NRH
 def nrh_model(I, alpha, Amax, theta, Rd):
     term1 = alpha * I + Amax
     term2 = np.sqrt(np.maximum(term1**2 - 4 * theta * alpha * I * Amax, 0.0))
     return (1 / (2 * np.maximum(theta, 1e-6))) * (term1 - term2) - Rd
 
 def fit_nrh(x, y):
-    p0 = [0.05, max(y) if len(y) > 0 else 30, 0.7, 1.0]
+    p0 = [0.05, 30, 0.8, 1.0]
     try:
         popt, _ = curve_fit(nrh_model, x, y, p0=p0, bounds=([0, 0, 0.01, -5], [0.2, 100, 0.999, 10]))
         return popt
     except:
         return None
 
-# Marker Size adjusted 
-MARKER_SIZE = 14 
-
-# Aesthetic settings
-oxygen_styles = {
-    "21%": {"color": "#FFB88A", "marker": "o", "label": "21%"},
-    "2%": {"color": "#A6C1FF", "marker": "s", "label": "2%"}
-}
-
-room_labels = {
-    "D": "16/10 °C",
-    "C": "22/16 °C",
-    "B": "28/22 °C",
-    "A": "34/28 °C"
-}
-
+# 3. הגדרות עיצוב
 room_order = ['D', 'C', 'B', 'A']
-n_bootstrap = 100 
+panel_letters = {"D": "a", "C": "b", "B": "c", "A": "d"}
+temp_labels = {"D": "16/10 °C", "C": "22/16 °C", "B": "28/22 °C", "A": "34/28 °C"}
+ox_colors = {'2%': '#A6C1FF', '21%': '#FFB88A'}
+ox_markers = {'2%': 's', '21%': 'o'}
 
-# Determine global Y max
-summary_all = df.groupby(['Room', 'Qin', 'Oxygen'])['A'].agg(['mean', 'sem']).reset_index()
-global_y_max = (summary_all['mean'] + summary_all['sem']).max()
-y_limit_upper = int(np.ceil(global_y_max / 5.0) * 5) + 5
-y_ticks = np.arange(0, y_limit_upper + 1, 5)
-
-# Font Sizes
-TITLE_SIZE = 30
-AXIS_LABEL_SIZE = 28
-TICK_LABEL_SIZE = 24
-LEGEND_SIZE = 24
-LEGEND_TITLE_SIZE = 26
-
-# Create figure
-fig, axes = plt.subplots(1, 4, figsize=(26, 8), sharey=True)
+# 4. יצירת הגרף (ללא ניתוח סטטיסטי)
+fig, axes = plt.subplots(1, 4, figsize=(24, 7), sharey=True)
 plt.subplots_adjust(wspace=0.1)
 
 for i, room in enumerate(room_order):
     ax = axes[i]
-    room_data = df[df['Room'] == room].dropna(subset=['Qin', 'A'])
-    
-    ax.grid(True, linestyle=':', alpha=0.6)
-    ax.set_ylim(0, y_limit_upper)
-    ax.set_yticks(y_ticks)
-    
-    # Pre-calculate significance stars
-    sig_stars = []
-    unique_qins = sorted(room_data['Qin'].unique())
-    for qin in unique_qins:
-        subset_qin = room_data[room_data['Qin'] == qin]
-        vals_21 = subset_qin[subset_qin['Oxygen'] == '21%']['A'].values
-        vals_2 = subset_qin[subset_qin['Oxygen'] == '2%']['A'].values
-        
-        if len(vals_21) > 1 and len(vals_2) > 1:
-            stat, p_val = ttest_ind(vals_21, vals_2)
-            if p_val < 0.05:
-                m21 = np.mean(vals_21) + np.std(vals_21)/np.sqrt(len(vals_21))
-                m2 = np.mean(vals_2) + np.std(vals_2)/np.sqrt(len(vals_2))
-                y_pos = max(m21, m2) + 1.0
-                sig_stars.append((qin, y_pos))
-
-    for oxy in ["21%", "2%"]:
-        subset = room_data[room_data['Oxygen'] == oxy]
-        if subset.empty: continue
-        
-        x_data = subset['Qin'].values
-        y_data = subset['A'].values
-        
-        popt = fit_nrh(x_data, y_data)
-        if popt is not None:
-            x_smooth = np.linspace(0, 2000, 300)
-            y_fit = nrh_model(x_smooth, *popt)
-            
-            # Bootstrap
-            y_pred_orig = nrh_model(x_data, *popt)
-            residuals = y_data - y_pred_orig
-            boot_preds = []
-            for _ in range(n_bootstrap):
-                boot_res = resample(residuals)
-                y_boot = y_pred_orig + boot_res
-                p_boot = fit_nrh(x_data, y_boot)
-                if p_boot is not None:
-                    boot_preds.append(nrh_model(x_smooth, *p_boot))
-            
-            boot_preds = np.array(boot_preds)
-            if len(boot_preds) > 0:
-                lower_band = np.percentile(boot_preds, 2.5, axis=0)
-                upper_band = np.percentile(boot_preds, 97.5, axis=0)
-                ax.fill_between(x_smooth, lower_band, upper_band, color=oxygen_styles[oxy]['color'], alpha=0.3, zorder=2)
-            
-            ax.plot(x_smooth, y_fit, color=oxygen_styles[oxy]['color'], linewidth=4, 
-                    label=oxygen_styles[oxy]['label'] if i == 0 else "", zorder=3)
-        
-        summary = subset.groupby('Qin')['A'].agg(['mean', 'sem']).reset_index()
-        style = oxygen_styles[oxy]
-        ax.errorbar(summary['Qin'], summary['mean'], yerr=summary['sem'], 
-                    fmt=style['marker'], color=style['color'], ecolor=style['color'], 
-                    elinewidth=2.5, capsize=6, markersize=MARKER_SIZE, markeredgecolor='white', 
-                    alpha=0.9, linestyle='None', zorder=4)
-
-    for qin, y in sig_stars:
-        ax.text(qin, y, '*', ha='center', va='bottom', fontsize=28, fontweight='bold', color='black')
-
     ax.set_facecolor('white')
-    for spine in ax.spines.values():
-        spine.set_edgecolor('black'); spine.set_linewidth(2)
+    ax.grid(True, linestyle=':', alpha=0.6)
+    ax.set_title(temp_labels[room], fontsize=20, fontweight='bold', pad=15)
+    ax.text(0.95, 0.95, f"({panel_letters[room]})", transform=ax.transAxes, 
+            fontsize=22, fontweight='bold', va='top', ha='right')
     
-    ax.set_title(room_labels[room], fontsize=TITLE_SIZE, fontweight='bold', pad=20)
-    if i == 0:
-        ax.set_ylabel(r'$A_n$ ($\mu mol \cdot m^{-2} \cdot s^{-1}$)', fontsize=AXIS_LABEL_SIZE, labelpad=15)
-    ax.set_xlabel(r'$Q_{in}$ ($\mu mol \cdot m^{-2} \cdot s^{-1}$)', fontsize=AXIS_LABEL_SIZE, labelpad=15)
-    ax.tick_params(axis='both', labelsize=TICK_LABEL_SIZE, width=2, length=6)
-    ax.set_xlim(0, 2100)
+    room_data = df[df['Room'] == room]
 
-axes[0].legend(title="Oxygen", fontsize=LEGEND_SIZE, title_fontsize=LEGEND_TITLE_SIZE, loc='upper left', frameon=False)
+    for ox in ['2%', '21%']:
+        sub = room_data[room_data['Oxygen'] == ox].sort_values('Qin')
+        if sub.empty: continue
+        summ = sub.groupby('Qin')['A'].agg(['mean', 'sem']).reset_index()
+        x_pts, y_m, y_s = summ['Qin'].values, summ['mean'].values, summ['sem'].fillna(0).values
+        popt = fit_nrh(sub['Qin'], sub['A'])
+        if popt is not None:
+            xs = np.linspace(0, 2000, 300)
+            ys = nrh_model(xs, *popt)
+            se_interp = np.interp(xs, x_pts, y_s)
+            ax.fill_between(xs, ys - se_interp, ys + se_interp, color=ox_colors[ox], alpha=0.2)
+            ax.plot(xs, ys, color=ox_colors[ox], linewidth=2.5)
+        ax.errorbar(x_pts, y_m, yerr=y_s, fmt=ox_markers[ox], color=ox_colors[ox], 
+                    ecolor=ox_colors[ox], capsize=4, markersize=10, markeredgecolor='white', alpha=0.9, linestyle='None')
+
+    ax.set_xlim(-50, 2100)
+    ax.set_ylim(-2, 25)
+    ax.set_xlabel(r'$Q_{in}$ ($\mu mol \cdot m^{-2} \cdot s^{-1}$)', fontsize=18)
+    ax.tick_params(axis='both', labelsize=14)
+    for spine in ax.spines.values():
+        spine.set_edgecolor('black')
+        spine.set_linewidth(1.2)
+
+axes[0].set_ylabel(r'$A_n$ ($\mu mol \cdot m^{-2} \cdot s^{-1}$)', fontsize=20)
+legend_elements = [
+    Line2D([0], [0], color=ox_colors['21%'], lw=2.5, marker='o', markersize=9, markeredgecolor='white', label='21%'),
+    Line2D([0], [0], color=ox_colors['2%'], lw=2.5, marker='s', markersize=9, markeredgecolor='white', label='2%')
+]
+axes[0].legend(handles=legend_elements, fontsize=16, loc='upper left', frameon=False)
 
 plt.tight_layout()
-plt.savefig('horizontal_final_adjusted.png', dpi=300, bbox_inches='tight')
-# The requested line:
-plt.savefig('light_curve1.pdf', bbox_inches='tight')
 
-print("Successfully generated: horizontal_final_adjusted.png and light_curve1.pdf")
+output_path = "/Users/oferhevlin/Documents/מחקר/aci_curve_large_symbols.pdf"
+
+fig.savefig(output_path, format="pdf", bbox_inches="tight")
+plt.show()
+
+print(f"הקובץ נשמר כאן:\n{output_path}")
