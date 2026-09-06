@@ -4,12 +4,12 @@ import matplotlib.pyplot as plt
 from scipy.optimize import curve_fit
 from matplotlib.lines import Line2D
 
-# 1. טעינת הנתונים
-file_path = '/Users/oferhevlin/Desktop/All Room Light 11 Apr 27 2025.csv'
+# 1. Load data
+file_path = '2025-04-27-AllRoom_light11.csv'
 df = pd.read_csv(file_path)
 df = df.dropna(subset=['A', 'Room', 'Qin', 'Oxygen'])
 
-# 2. הגדרת מודל NRH
+# 2. NRH Model definition
 def nrh_model(I, alpha, Amax, theta, Rd):
     term1 = alpha * I + Amax
     term2 = np.sqrt(np.maximum(term1**2 - 4 * theta * alpha * I * Amax, 0.0))
@@ -23,14 +23,14 @@ def fit_nrh(x, y):
     except:
         return None
 
-# 3. הגדרות עיצוב
+# 3. Figure Settings
 room_order = ['D', 'C', 'B', 'A']
 panel_letters = {"D": "a", "C": "b", "B": "c", "A": "d"}
 temp_labels = {"D": "16/10 °C", "C": "22/16 °C", "B": "28/22 °C", "A": "34/28 °C"}
 ox_colors = {'2%': '#A6C1FF', '21%': '#FFB88A'}
 ox_markers = {'2%': 's', '21%': 'o'}
 
-# 4. יצירת הגרף (ללא ניתוח סטטיסטי)
+# 4. Plot creation (without statistical stars)
 fig, axes = plt.subplots(1, 4, figsize=(24, 7), sharey=True)
 plt.subplots_adjust(wspace=0.1)
 
@@ -75,10 +75,4 @@ legend_elements = [
 axes[0].legend(handles=legend_elements, fontsize=16, loc='upper left', frameon=False)
 
 plt.tight_layout()
-
-output_path = "/Users/oferhevlin/Documents/מחקר/aci_curve_large_symbols.pdf"
-
-fig.savefig(output_path, format="pdf", bbox_inches="tight")
 plt.show()
-
-print(f"הקובץ נשמר כאן:\n{output_path}")
