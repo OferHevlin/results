@@ -1,101 +1,243 @@
-import pandas as pd
-import matplotlib.pyplot as plt
-import seaborn as sns
-import numpy as np
-from statsmodels.stats.multicomp import pairwise_tukeyhsd
-import networkx as nx
+import io
 import string
+import matplotlib.pyplot as plt
+import networkx as nx
+import numpy as np
+import pandas as pd
+import seaborn as sns
+from statsmodels.stats.multicomp import pairwise_tukeyhsd
 
-# 1. טעינת הנתונים והכנתם
-df = pd.read_csv('picaro.xlsx - Sheet1.csv')
-df = df[df['sample'].isin(['A', 'B', 'C', 'D'])].copy()
+# 1. נתוני הניסוי מוטמעים ישירות בקוד
+raw_data = """room,plant,total mass,LA,LMA,wet root,wet shoot,leaf number,leaf
+A,1,520,6443.185,558.729883,320,1420,12,130.559
+A,2,540,5511.664,653.160280,400,1200,11,122.552
+A,3,500,5577.704,645.426864,400,1180,12,109.000
+A,4,560,6068.473,428.443861,380,1380,10,106.804
+A,5,520,6294.028,635.523070,360,1280,12,125.813
+A,6,640,7077.568,452.132717,440,1440,11,124.000
+B,1,820,7920.000,530.303030,560,1600,11,112.000
+B,2,640,6150.000,650.406504,480,1480,12,107.000
+B,3,720,7300.000,520.547945,400,1540,12,99.000
+B,4,800,6480.000,663.580247,480,1680,11,103.000
+B,5,740,5470.000,603.290676,540,1500,10,83.000
+B,6,800,6830.000,527.086384,380,1580,10,95.000
+C,1,520,3200.000,750.000000,300,1040,9,73.000
+C,2,580,3520.000,852.272727,400,1160,9,76.000
+C,3,460,2650.000,905.660377,340,900,8,51.000
+C,4,520,3050.000,737.704918,320,1040,9,61.000
+C,5,400,3020.000,662.251656,400,820,8,49.000
+C,6,460,3170.000,741.324921,300,820,8,53.000
+D,1,220,1480.000,709.459459,180,420,6,42.000
+D,2,160,1130.000,601.769912,180,400,5,41.000
+D,3,260,1690.000,721.893491,260,480,7,50.000
+D,4,200,1310.000,595.419847,220,440,6,45.000
+D,5,180,1570.000,738.853503,240,400,7,47.000
+D,6,220,1390.000,856.115108,260,480,6,49.000
+"""
 
-room_map = {
+df = pd.read_csv(io.StringIO(raw_data))
+
+# 2. מיפוי וסדר הטמפרטורות
+room_map_codes = {
     'D': '16/10°C',
     'C': '22/16°C',
     'B': '28/22°C',
-    'A': '34/28°C'
+    'A': '34/28°C',
 }
-room_order = ["16/10°C", "22/16°C", "28/22°C", "34/28°C"]
-colors = ["#89AFFF", "#9D8AF2", "#E371A9", "#FF9D66"]
+room_order = ['16/10°C', '22/16°C', '28/22°C', '34/28°C']
+colors = ['#89AFFF', '#9D8AF2', '#E371A9', '#FF9D66']
 
-df['RoomName'] = df['sample'].map(room_map)
-df['RoomName'] = pd.Categorical(df['RoomName'], categories=room_order, ordered=True)
+df['RoomName'] = df['room'].map(room_map_codes)
+df['RoomName'] = pd.Categorical(
+    df['RoomName'], categories=room_order, ordered=True
+)
+df['wet_ratio'] = df['wet root'] / df['wet shoot']
 
-# 2. חישוב אותיות סטטיסטיות (Tukey HSD)
-def get_stat_letters(data, var_name):
-    df_sub = data.dropna(subset=[var_name, 'RoomName'])
-    if df_sub.empty: return {r: "" for r in room_order}
-    tukey = pairwise_tukeyhsd(endog=df_sub[var_name], groups=df_sub['RoomName'].astype(str), alpha=0.05)
-    G = nx.Graph()
-    G.add_nodes_from(room_order)
-    summary_data = tukey.summary().data
-    results_df = pd.DataFrame(summary_data[1:], columns=summary_data[0])
-    for _, row in results_df.iterrows():
-        if not row['reject']: G.add_edge(row['group1'], row['group2'])
-    cliques = list(nx.find_cliques(G))
-    means = df_sub.groupby('RoomName', observed=True)[var_name].mean()
-    sorted_cliques = sorted(cliques, key=lambda c: means[list(c)].mean(), reverse=True)
-    letters = {cat: "" for cat in room_order}
-    for i, clique in enumerate(sorted_cliques):
-        char = string.ascii_lowercase[i]
-        for cat in clique: letters[cat] += char
-    return {k: "".join(sorted(list(set(v)))) for k, v in letters.items()}
 
-# 3. בניית הגרף הבודד עבור עמודת average
-sns.set_theme(style="whitegrid")
+# 3. פונקציה לייצור אותיות המובהקות הסטטיסטית (Tukey HSD)
+def get_stat_letters(data, var_name, order):
+  df_sub = data.dropna(subset=[var_name, 'RoomName'])
+  if df_sub.empty:
+    return {r: '' for r in order}
 
-# ניקוי מוחלט של הלוח כדי לוודא שאין גרפים קודמים ברקע
-plt.clf()
-fig, ax = plt.subplots(figsize=(9, 8))
+  tukey = pairwise_tukeyhsd(
+      endog=df_sub[var_name],
+      groups=df_sub['RoomName'].astype(str),
+      alpha=0.05,
+  )
+  summary_data = tukey.summary().data
+  results_df = pd.DataFrame(summary_data[1:], columns=summary_data[0])
 
-col = 'average'
-stats = df.groupby('RoomName', observed=True)[col].agg(['mean', 'std', 'count']).reindex(room_order)
-stats['se'] = stats['std'] / np.sqrt(stats['count'])
-letters_dict = get_stat_letters(df, col)
+  G = nx.Graph()
+  G.add_nodes_from(order)
+  for _, row in results_df.iterrows():
+    if not row['reject']:
+      G.add_edge(row['group1'], row['group2'])
 
-# יצירת ה-Boxplot (ללא whiskers ברירת מחדל)
-sns.boxplot(data=df, x='RoomName', y=col, order=room_order, palette=colors,
-            width=0.4, showfliers=False, whis=0, 
-            linewidth=1.5, ax=ax,
-            boxprops=dict(edgecolor='black'), 
-            medianprops=dict(color='black', linewidth=2.5))
+  cliques = list(nx.find_cliques(G))
+  means = df_sub.groupby('RoomName', observed=True)[var_name].mean()
+  sorted_cliques = sorted(
+      cliques, key=lambda c: means[list(c)].mean(), reverse=True
+  )
 
-# הוספת הנקודות
-sns.stripplot(data=df, x='RoomName', y=col, order=room_order, 
-              color='black', alpha=0.3, jitter=True, size=5, ax=ax)
+  letters = {cat: '' for cat in order}
+  for i, clique in enumerate(sorted_cliques):
+    char = string.ascii_lowercase[i]
+    for cat in clique:
+      letters[cat] += char
 
-# הוספת קווי שגיאה (SE) ונקודת ממוצע
-x_pos = np.arange(len(room_order))
-ax.plot(x_pos, stats['mean'], 'ko', markersize=5)
-ax.errorbar(x_pos, stats['mean'], yerr=stats['se'], fmt='none', 
-            ecolor='black', capsize=8, elinewidth=2)
+  return {k: ''.join(sorted(list(set(v)))) for k, v in letters.items()}
 
-# עיצוב רשת וצירים
-ax.xaxis.grid(True, color='lightgrey', linestyle='-', linewidth=0.5)
-ax.yaxis.grid(True, color='lightgrey', linestyle='-', linewidth=0.5)
 
-# גדלי פונטים וכותרות
-ax.set_ylabel('Delta', fontsize=22) 
-ax.set_xlabel('Growth temperature', fontsize=20)
-ax.tick_params(axis='both', which='major', labelsize=16)
+# 4. הגדרת עיצוב נקי
+plt.rcdefaults()
+sns.set_theme(style='white')
 
-# התאמת גבולות הציד ומיקום אותיות סטטיסטיות
-v_max = df[col].max()
-v_min = df[col].min()
-ylim_top = v_max + abs(v_max * 0.2)
-ax.set_ylim(v_min - abs(v_min * 0.15), ylim_top)
+fig, axes = plt.subplots(3, 2, figsize=(14, 18))
+axes = axes.flatten()
 
-for j, room in enumerate(room_order):
-    room_vals = df[df['RoomName'] == room][col]
+plots_info = [
+    {
+        'var': 'total mass',
+        'ylabel': 'Biomass (g)',
+        'data': df,
+        'panel_label': '(a)',
+        'ylim_func': lambda d, v: (d[v].min() * 0.8, d[v].max() * 1.15),
+    },
+    {
+        'var': 'LA',
+        'ylabel': 'LA ($cm^2$)',
+        'data': df,
+        'panel_label': '(b)',
+        'ylim_func': lambda d, v: (d[v].min() * 0.8, d[v].max() * 1.15),
+    },
+    {
+        'var': 'LMA',
+        'ylabel': 'LMA ($g/m^2$)',
+        'data': df,
+        'panel_label': '(c)',
+        'ylim_func': lambda d, v: (d[v].min() * 0.8, d[v].max() * 1.2),
+    },
+    {
+        'var': 'wet_ratio',
+        'ylabel': 'Root/shoot ratio',
+        'data': df.drop(index=10),
+        'panel_label': '(d)',
+        'ylim_func': lambda d, v: (0, d[v].max() * 1.3),
+    },
+    {
+        'var': 'leaf number',
+        'ylabel': 'Number of leaves',
+        'data': df,
+        'panel_label': '(e)',
+        'ylim_func': lambda d, v: (d[v].min() * 0.8, d[v].max() * 1.15),
+    },
+    {
+        'var': 'leaf',
+        'ylabel': 'Max Leaf length (cm)',
+        'data': df,
+        'panel_label': '(f)',
+        'ylim_func': lambda d, v: (d[v].min() * 0.8, d[v].max() * 1.15),
+    },
+]
+
+# 5. לולאה לציור ועיצוב הפאנלים
+for i, info in enumerate(plots_info):
+  ax = axes[i]
+  var = info['var']
+  curr_data = info['data'].dropna(subset=[var, 'RoomName']).copy()
+  letters_dict = get_stat_letters(curr_data, var, room_order)
+
+  ax.set_facecolor('white')
+
+  # Boxplot
+  sns.boxplot(
+      data=curr_data,
+      x='RoomName',
+      y=var,
+      order=room_order,
+      palette=colors,
+      width=0.4,
+      showfliers=False,
+      whis=[0, 100],
+      linewidth=1.2,
+      ax=ax,
+      boxprops=dict(edgecolor='black'),
+      medianprops=dict(color='black', linewidth=2.5),
+  )
+
+  # Stripplot
+  sns.stripplot(
+      data=curr_data,
+      x='RoomName',
+      y=var,
+      order=room_order,
+      color='black',
+      alpha=0.3,
+      jitter=True,
+      size=6,
+      ax=ax,
+  )
+
+  # קווי רשת ידניים ואחידים
+  ax.grid(
+      True,
+      which='major',
+      axis='both',
+      color='#E0E0E0',
+      linestyle='-',
+      linewidth=0.8,
+  )
+  ax.set_axisbelow(True)
+
+  for spine in ax.spines.values():
+    spine.set_color('#CCCCCC')
+    spine.set_linewidth(0.8)
+
+  ax.set_ylabel(
+      info['ylabel'], fontsize=18, fontweight='normal', color='black'
+  )
+  ax.set_xlabel(
+      'Growth temperature', fontsize=18, fontweight='normal', color='black'
+  )
+  ax.tick_params(axis='both', labelsize=15, labelcolor='black', colors='#666666')
+
+  ymin, ymax = info['ylim_func'](curr_data, var)
+  ax.set_ylim(ymin, ymax)
+
+  for j, room in enumerate(room_order):
+    room_vals = curr_data[curr_data['RoomName'] == room][var]
     if not room_vals.empty:
-        top_of_bar = max(room_vals.max(), stats.loc[room, 'mean'] + stats.loc[room, 'se'])
-        ax.text(j, top_of_bar + abs(ylim_top * 0.02), letters_dict[room], 
-                ha='center', va='bottom', fontsize=18, fontweight='bold')
+      top_val = room_vals.max()
+      ax.text(
+          j,
+          top_val + (ymax * 0.02),
+          letters_dict[room],
+          ha='center',
+          va='bottom',
+          fontsize=20,
+          fontweight='normal',
+          color='black',
+      )
+
+  ax.text(
+      0.03,
+      0.97,
+      info['panel_label'],
+      transform=ax.transAxes,
+      fontsize=22,
+      fontweight='bold',
+      va='top',
+      ha='left',
+      bbox=dict(
+          facecolor='white',
+          alpha=0.8,
+          edgecolor='none',
+          boxstyle='round,pad=0.2',
+      ),
+  )
 
 plt.tight_layout()
-
-# שורות הסיום המבוקשות
-plt.savefig('jt_vs_qin_ylim200.png', dpi=300)
-plt.savefig('jt_vs_qin_ylim200.pdf')
+plt.savefig('growth_metrics_complete_figure.png', dpi=300, bbox_inches='tight')
+plt.savefig('growth_metrics_complete_figure.pdf', bbox_inches='tight')
 plt.show()
